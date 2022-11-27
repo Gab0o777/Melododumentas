@@ -1,4 +1,7 @@
+import os
 import slack
+from pathlib import Path
+from dotenv import load_dotenv
 from utils import getUnixTimestamp
 
 # Literals
@@ -8,16 +11,31 @@ MESSAGES_KEY = "messages"
 BLOCKS_KEY = "blocks"
 ELEMENTS_KEY = "elements"
 
+load_dotenv(dotenv_path=Path(".") / '.env')
+SLACK_TOKEN = os.environ['SLACK_TOKEN']
 
 class SlackHelper:
-    def __init__(self, token):
-        self.token = token
-        self.client = slack.WebClient(token=token)
+
+    def __init__(self):
+        self.client = slack.WebClient(token=SLACK_TOKEN)
+
+    def writeMessageInChannel(self, channel, text):
+        self.client.chat_postMessage(channel=channel, text=text)
 
     def getAlertsInRange(self, channel, date1, date2):
+        """ Retrieves and formats triggered alerts in channel.
+
+        Attributes:
+            channel: channel_id to get messages from
+            date1: initial date
+            date2: final date
+        """
         alerts = []
+
+        # Getting channel messages in date range
         history = self.getChannelHistory(channel, date1, date2)
 
+        # Check if it is a triggered alert for each message in channel
         for message in history.get(MESSAGES_KEY):
             alert = {}
             for block in message.get(BLOCKS_KEY):
@@ -35,6 +53,7 @@ class SlackHelper:
             if message.get(THREAD_TS) != None:
                 thread_id = message.get(THREAD_TS)
 
+                # Retrieve thread messages from slack
                 thread_messages = self.getMessageReplies(channel, thread_id)
 
                 users = {}
@@ -42,6 +61,7 @@ class SlackHelper:
                     user_id = thread.get("user")
                     user_info = {}
 
+                    # Retrieving user from thread message
                     if users.get(user_id) != None:
                         user_info = users.get(user_id)
                     else:
@@ -49,41 +69,55 @@ class SlackHelper:
                         users[user_id] = user_info
 
                     thread["user"] = {
-                        "name": user_info.get("realname"),
+                        "name": user_info.get("real_name"),
                         "email": user_info.get("email"),
                         "picture": user_info.get("image_24"),
                     }
 
+                    # Retrieves file url for each attachment in thread message
                     if (thread.get("files") != None):
                         files_list = []
 
-                        if (len(thread.get("files")) == 1):
-                            for attachment in thread.get("files"):
-                                file = self.getAttachment(attachment.get("id"))
-                                print(file)
-                                files_list.append(file.get("thumb_800"))
+                        for attachment in thread.get("files"):
+                            file = self.getAttachment(attachment.get("id"))
+                            files_list.append(file.get("url_private_download"))
+
                         thread["files"] = files_list
                                
 
                 # First message in threads is parent message so it is removed in threads
                 alert["threads"] = thread_messages[1:]
 
+
             if (alert.get("app") != None):
                 alerts.append(alert)
-
 
         return alerts
 
     def getAttachment(self, attachment_id): 
+        """ Returns file information for given id.
+
+        Attributes:
+            attachment_id: slack file id to get info of
+        """
         return self.client.api_call(
-            "files.info",
+            'files.info',
             params={
-                "token": self.token,
-                "file": attachment_id
+                'token': SLACK_TOKEN,
+                'file': attachment_id
             },
-        ).get("file")
+        ).get('file')
 
     def getChannelHistory(self, channel, date1, date2):
+        """Retrieves channel message history in date range from slack.
+
+        Attributes:
+            channel: channel_id to get messages from
+            date1: initial date
+            date2: final date
+        """
+
+        # Slack needs unix timestamp
         initial_date = getUnixTimestamp(date1)
         final_date = getUnixTimestamp(date2)
 
@@ -98,23 +132,53 @@ class SlackHelper:
         )
 
     def getMessageReplies(self, channel, thread_id):
+        """ Retrieves messages from thread.
+
+        Attributes
+            channel: channel_id to get messages from
+            thread_id: id of thread
+        """
         return self.client.api_call(
-            "conversations.replies", params={"channel": channel, "ts": thread_id}
+            'conversations.replies', 
+            params={ 
+                'channel': channel,
+                'ts': thread_id
+            }
         ).get("messages")
 
     def getUserProfile(self, user):
-        return self.client.api_call("users.profile.get", params={"user": user}).get(
-            "profile", None
-        )
+        """ Retrieves user information.
+
+        Attributes:
+            user: user_id to get info of
+        """
+        return self.client.api_call(
+            'users.profile.get', 
+                params={ 
+                    'user': user
+                }
+            ).get('profile', None)
 
     def getTextFromMessageElement(self, element):
+
+        # Message text can be in root or in root.elements.text
         text = element.get("text")
+
         if text == None:
             text = element.get(ELEMENTS_KEY)[0].get("text")
         return text
     
     def getApplicationFromMessage(self, text):
+        """ Returns the application name and triggered alert's reason
+            if Opsgenie message is detected in text.
+
+        Attributes:
+            text: string to parse
+        """
         app = {"appname": "", "reason": ""}
+
+        if (text == None):
+            return app
 
         if APPLICATION_TERM in text:
             splitted = text.split("}")
